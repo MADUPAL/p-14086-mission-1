@@ -4,6 +4,7 @@ import java.lang.reflect.Field;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.function.Function;
 
 /**
  *  Sql 역할
@@ -70,82 +71,49 @@ public class Sql {
     public long insert() {
         String rawSql = getRawSqlOrThrow();
 
-        Connection conn = null;
-        try {
-            conn = simpleDb.getConnection();
-            boolean inTransaction = simpleDb.isInTransaction();
-            try(PreparedStatement pstmt = conn.prepareStatement(rawSql, Statement.RETURN_GENERATED_KEYS)) {
+        return withConnection(conn-> {
+            try (PreparedStatement pstmt = conn.prepareStatement(rawSql, Statement.RETURN_GENERATED_KEYS)) {
                 bindParams(pstmt);
                 pstmt.executeUpdate();
 
                 //rs는 resource 반납해야함
-                try(ResultSet rs = pstmt.getGeneratedKeys()) {
+                try (ResultSet rs = pstmt.getGeneratedKeys()) {
                     if (rs.next()) {
                         return rs.getLong(1);
                     }
                 }
                 return 0L;
-            } finally {
-                if(!inTransaction && conn != null) {
-                    try{
-                        conn.close();
-
-                    } catch (SQLException ignore) {}
-                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
             }
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        });
     }
 
     public int update() {
         String rawSql = getRawSqlOrThrow();
 
-        Connection conn = null;
-
-        try {
-            conn = simpleDb.getConnection();
-            boolean inTransaction = simpleDb.isInTransaction();
-
-            try(PreparedStatement pstmt = conn.prepareStatement(rawSql)) {
+        return withConnection(conn -> {
+            try (PreparedStatement pstmt = conn.prepareStatement(rawSql)) {
                 bindParams(pstmt);
                 return pstmt.executeUpdate();
-            } finally {
-                if(!inTransaction && conn != null) {
-                    try{
-                        conn.close();
-
-                    } catch (SQLException ignore) {}
-                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
             }
-
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        });
     }
 
     public int delete() {
         String rawSql = getRawSqlOrThrow();
 
-        Connection conn = null;
-        try {
-            conn = simpleDb.getConnection();
-            boolean inTransaction = simpleDb.isInTransaction();
+        return withConnection(conn -> {
             try(PreparedStatement pstmt = conn.prepareStatement(rawSql)) {
                 bindParams(pstmt);
 
                 return pstmt.executeUpdate();
-            } finally {
-                if(!inTransaction && conn != null) {
-                    try{
-                        conn.close();
-
-                    } catch (SQLException ignore) {}
-                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
             }
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
+        });
     }
 
     //select -> executeQuery()사용
@@ -153,13 +121,11 @@ public class Sql {
     public List<Map<String, Object>> selectRows() {
         String rawSql = getRawSqlOrThrow();
 
-        Connection conn = null;
-        try {
-            conn = simpleDb.getConnection();
-            boolean inTransaction = simpleDb.isInTransaction();
+        return withConnection(conn -> {
 
             try(PreparedStatement pstmt = conn.prepareStatement(rawSql)) {
-                bindParams(pstmt);
+                    bindParams(pstmt);
+
 
                 try (ResultSet rs = pstmt.executeQuery()) {
                     List<Map<String, Object>> rows = new ArrayList<>();
@@ -175,7 +141,7 @@ public class Sql {
                             String columnName = meta.getColumnLabel(i); //as 없으면 getColumnName값을 반환
                             Object value = rs.getObject(i);
 
-                            if(value instanceof Timestamp ts) {
+                            if (value instanceof Timestamp ts) {
                                 value = ts.toLocalDateTime();
                             }
 
@@ -186,17 +152,11 @@ public class Sql {
 
                     return rows;
                 }
-            } finally {
-                if (!inTransaction && conn != null) {
-                    try {
-                        conn.close();
-                    } catch (SQLException ignore) {}
-                }
+            } catch (SQLException e) {
+                throw new RuntimeException(e);
             }
+        });
 
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
     }
     /**
      * 리플렉션으로 객체 생성 후 객체리스트반환
@@ -342,35 +302,22 @@ public class Sql {
     private Object selectSingleValue() {
         String rawSql = getRawSqlOrThrow();
 
-        Connection conn = null;
-        try {
-            conn = simpleDb.getConnection();
-            boolean inTransaction = simpleDb.isInTransaction();
-
+        return withConnection(conn-> {
             try(PreparedStatement pstmt = conn.prepareStatement(rawSql)) {
                 // 파라미터 바인딩
                 bindParams(pstmt);
 
                 try (ResultSet rs = pstmt.executeQuery()) {
-
                     if (!rs.next()) {
                         return null;
                     }
-
                     return rs.getObject(1);
                 }
-            } finally {
-                if (!inTransaction && conn != null) {
-                    try {
-                        conn.close();
-                    } catch (SQLException ignore) {}
-                }
+            } catch(SQLException e) {
+                throw new RuntimeException(e);
             }
+        });
 
-
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
     }
 
     /**
@@ -389,7 +336,7 @@ public class Sql {
 
         for (int i = 1; i < splits.length; i++) {
             String str = splits[i];
-            sb.append(Character.toLowerCase(str.charAt(0)));
+            sb.append(Character.toUpperCase(str.charAt(0)));
             sb.append(str.substring(1).toLowerCase());
         }
 
@@ -440,6 +387,33 @@ public class Sql {
     private void bindParams(PreparedStatement pstmt) throws SQLException {
         for(int i = 0; i < params.size(); i++) {
             pstmt.setObject(i+1, params.get(i));
+        }
+    }
+
+    /**
+     * 1. simpleDb.getConnection()으로 커넥션 가져오기
+     * 2. simpleDb.isInTransaction()으로 트랜잭션 여부 확인
+     * 3. PreparedStatement 만들고 파라미터 바인딩하고 execute
+     * 4. 트랜잭션이 아니면 커넥션 닫기, 트랜잭션이면 안 닫기
+     * 5. SQLException → RuntimeException으로 감싸서 던지기
+     * 1~5를 템플릿 함수로 만듦
+     * 실제 쿼리 실행 로직만 콜백으로 넘기기 <Connection, T> -> Connection타입을 받고 T타입을 리턴하는 함수
+     */
+    private <T> T withConnection(Function<Connection, T> callback) {
+        Connection conn = null;
+        try {
+            conn = simpleDb.getConnection();
+            boolean inTx = simpleDb.isInTransaction();
+
+            try {
+                return callback.apply(conn);
+            } finally {
+                if (!inTx && conn != null) {
+                    try { conn.close(); } catch (SQLException ignore) {}
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
         }
     }
 }
